@@ -1,0 +1,25 @@
+services:
+  idrac-sse:
+    container_name: idrac-sse
+    build:
+      context: ./
+    restart: unless-stopped
+    environment:
+      - "iDRAC_USERNAME=root"
+      - iDRAC_PASSWORD
+      - OTEL_RECEIVER
+      - HTTP_RECEIVER
+    volumes:
+      - ./app/hosts:/code/app/hosts
+    network_mode: host
+
+  # idrac-sse-testserver:
+  #   container_name: idrac-sse-testserver
+  #   build:
+  #     context: ./
+  #   restart: unless-stopped
+  #   volumes:
+  #     - ./app/hosts:/code/app/hosts
+  #   command: "uvicorn app.server:app --reload --host 0.0.0.0 --port 8000"
+  #   ports:
+  #     - 8000:8000
