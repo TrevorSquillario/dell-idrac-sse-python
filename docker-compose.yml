@@ -1,8 +1,10 @@
+
+
 services:
   idrac-sse:
     container_name: idrac-sse
     build:
-      context: ./
+      context: ./src/idrac-sse
     restart: unless-stopped
     environment:
       - "iDRAC_USERNAME=root"
@@ -10,16 +12,23 @@ services:
       - OTEL_RECEIVER
       - HTTP_RECEIVER
     volumes:
-      - ./app/hosts:/code/app/hosts
-    network_mode: host
+      - ./hosts:/code/app/hosts
+    #network_mode: host
+    networks:
+      - idrac-sse-demo
 
-  # idrac-sse-testserver:
-  #   container_name: idrac-sse-testserver
-  #   build:
-  #     context: ./
-  #   restart: unless-stopped
-  #   volumes:
-  #     - ./app/hosts:/code/app/hosts
-  #   command: "uvicorn app.server:app --reload --host 0.0.0.0 --port 8000"
-  #   ports:
-  #     - 8000:8000
+  # Generate SSL Certificate: openssl req -x509 -newkey rsa:4096 -nodes -out cert.pem -keyout key.pem -days 365
+  idrac-sse-testserver:
+    container_name: idrac-sse-testserver
+    build:
+      context: ./src/test-server
+    restart: unless-stopped
+    command: "uvicorn app.server:app --reload --host 0.0.0.0 --port 443 --ssl-keyfile /code/app/key.pem --ssl-certfile /code/app/cert.pem"
+    ports:
+      - 8000:8000
+    networks:
+      - idrac-sse-demo
+
+networks:
+  idrac-sse-demo:
+    driver: bridge

@@ -5,7 +5,4 @@ requests
 asyncio
 #sseclient
 httpx_sse
-stamina
-
-# Testing 
-sse_starlette
+tenacity

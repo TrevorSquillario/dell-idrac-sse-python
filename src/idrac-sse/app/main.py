@@ -10,12 +10,9 @@ import time
 from typing import Iterator
 #from sseclient import SSEClient
 from httpx_sse import connect_sse, aconnect_sse
-from stamina import retry
+#from stamina import retry
+from tenacity import retry, stop_after_attempt, stop_after_delay, wait_exponential
 from datetime import datetime
-import pprint
-
-#logger = logging.getLogger('uvicorn')
-#logger.setLevel(logging.DEBUG)
 
 logger = logging.getLogger('idrac-sse')
 handler = logging.StreamHandler()
@@ -31,10 +28,8 @@ idrac_password = os.environ.get('iDRAC_PASSWORD')
 otel_receiver = os.environ.get('OTEL_RECEIVER')
 http_receiver = os.environ.get('HTTP_RECEIVER')
 
-retry_attempts = 100
-retry_initial_wait = 30.0
-retry_wait_exp_base = 2
 timeout = httpx.Timeout(10.0, read=None)
+transport = httpx.AsyncHTTPTransport(verify=False, retries=10)
 
 otlp_json = """{
   "resourceLogs": [
@@ -100,17 +95,30 @@ idrac_severity_otlp_severity_text_map = {
     "Info": "Information",
 }
 
-@retry(on=(httpx.HTTPError), attempts=retry_attempts, wait_initial=retry_initial_wait, wait_exp_base=retry_wait_exp_base)
 def test_host_connection(host):
     url = "https://%s/redfish/v1/Managers/iDRAC.Embedded.1" % (host)
     logger.debug("Testing connection to %s" % (url))
-    response = httpx.get(url, timeout=timeout, verify=False, auth=(idrac_username, idrac_password))
+    response = httpx.get(url, verify=False, timeout=timeout, auth=(idrac_username, idrac_password))
+    # Throw exception on status codes > 200
+    response.raise_for_status()
     if response.status_code == 200:
         return True
     else:
         logger.error(response.json())
         return False
 
+async def test_host_connection_async(host):
+    url = "https://%s/redfish/v1/Managers/iDRAC.Embedded.1" % (host)
+    logger.debug("Testing connection to %s" % (url))
+    async with httpx.AsyncClient(transport=transport, timeout=timeout) as client:
+        response = await client.get(url, auth=(idrac_username, idrac_password))
+        # Throw exception on status codes > 200
+        response.raise_for_status()
+        if response.status_code == 200:
+            return True
+        else:
+            logger.error(response.json())
+            return False
 
 def convert_redfish_event_to_otlp(redfish_event):
     otlp = json.loads(otlp_json)
@@ -171,73 +179,47 @@ async def send_to_endpoint(event, endpoint):
     except httpx.TimeoutException:
         logger.error("Request to %s timed out!" % (endpoint))
 
-# This works, non async client. Using httpx instead
-# def get_idrac_sse_sseclient():
-#     url = "https://169.254.1.1/redfish/v1/SSE?$filter=EventFormatType%20eq%20Event"
-#     events = SSEClient(url, headers={'Content-type' : 'application/json'},
-#         verify=False,
-#         timeout=None,
-#         auth=(user, password))
-#     for event in events:
-#         logger.debug(event)
-
-# async def iter_sse_retrying(client, method, url, auth):
-#     last_event_id = ""
-#     reconnection_delay = 0.0
-
-#     # `stamina` will apply jitter and exponential backoff on top of
-#     # the `retry` reconnection delay sent by the server.
-#     @retry(on=httpx.ReadError, attempts=retries)
-#     async def _iter_sse():
-#         nonlocal last_event_id, reconnection_delay
-
-#         time.sleep(reconnection_delay)
-
-#         headers = {"Accept": "text/event-stream"}
-
-#         if last_event_id:
-#             headers["Last-Event-ID"] = last_event_id
-
-#         async with aconnect_sse(client, method, url, headers=headers, auth=auth) as event_source:
-#             async for sse in event_source.aiter_sse():
-#                 last_event_id = sse.id
-
-#                 if sse.retry is not None:
-#                     reconnection_delay = sse.retry / 1000
-
-#                 yield sse
-
-#     return _iter_sse()
-
-@retry(on=(httpx.HTTPError), attempts=retry_attempts, wait_initial=retry_initial_wait, wait_exp_base=retry_wait_exp_base)
+#@retry(on=(httpx.HTTPError), attempts=retry_attempts, wait_initial=retry_initial_wait, wait_exp_base=retry_wait_exp_base)
+###
+# Exponential Backoff 
+#   * Wait 10 seconds between each retry starting with 10 seconds, then up to 3600 seconds (1 hour). Stop after 86400 seconds (1 day)
+#   * The @retry tenacity decorator only gets triggered if an Exception is thrown
+###
+@retry(wait=wait_exponential(multiplier=10, min=10, max=3600), stop=stop_after_delay(30))
 async def get_idrac_sse_httpx(host):
     # Set dynamic property for current task that stores the hostname
-    asyncio.current_task().hostname = host
-    #transport = httpx.AsyncHTTPTransport(retries=999)
-    async with httpx.AsyncClient(verify=False, timeout=timeout) as client:
-        #url = "https://%s/redfish/v1/SSE?$filter=EventFormatType eq Event" % (host)
-        url = "http://127.0.0.1:8000/"
-        logger.debug("Opening SSE connection to %s" % (url))
-        #async for sse in await iter_sse_retrying(client, "GET", url, (idrac_username, idrac_password)):
-        async with aconnect_sse(client, "GET", url, auth=(idrac_username, idrac_password)) as event_source:
-        #async with aconnect_sse(client, "GET", url) as event_source:
-            async for sse in event_source.aiter_sse():
-                if sse.data != None and sse.data != "":
-                    logger.debug("Processing SSE event...")
-                    event_json = json.loads(sse.data)
-                    logger.debug(json.dumps(event_json, indent=4))
-                    # Send to OpenTelemetry Collector OTLP HTTP Receiver
-                    if otel_receiver != None and otel_receiver != "":
-                        logger.debug("DEBUG1")
-                        otlp_event = convert_redfish_event_to_otlp(event_json)
-                        result = await send_to_endpoint(otlp_event, otel_receiver)
+    current_task = asyncio.current_task()
+    current_task.hostname = host
+    logger.debug(f"Running Task for host {host}: {current_task}")
+    con_result = await test_host_connection_async(host)
+    #con_result = test_host_connection(host)
+    if con_result:
+        logger.debug("Testing connection to %s result SUCCESS" % (host))
+        async with httpx.AsyncClient(transport=transport, timeout=timeout) as client:
+            url = "https://%s/redfish/v1/SSE?$filter=EventFormatType eq Event" % (host)
+            logger.debug("Opening SSE connection to %s" % (url))
+            async with aconnect_sse(client, "GET", url, auth=(idrac_username, idrac_password)) as event_source:
+                # Throw exception on status codes > 200
+                event_source.response.raise_for_status()
+                async for sse in event_source.aiter_sse():
+                    if sse.data != None and sse.data != "":
+                        logger.debug("Processing SSE event...")
+                        event_json = json.loads(sse.data)
+                        logger.debug(json.dumps(event_json, indent=4))
+                        # Send to OpenTelemetry Collector OTLP HTTP Receiver
+                        if otel_receiver != None and otel_receiver != "":
+                            logger.debug("DEBUG1")
+                            otlp_event = convert_redfish_event_to_otlp(event_json)
+                            result = await send_to_endpoint(otlp_event, otel_receiver)
 
-                    # Send to other HTTP endpoint
-                    if http_receiver != None and http_receiver != "":
-                        logger.debug("DEBUG2")
-                        result = await send_to_endpoint(event_json, http_receiver)
+                        # Send to other HTTP endpoint
+                        if http_receiver != None and http_receiver != "":
+                            logger.debug("DEBUG2")
+                            result = await send_to_endpoint(event_json, http_receiver)
 
-                    #yield event_json
+                        #yield event_json
+    else:
+        logger.debug("Testing connection to %s result FAILURE" % (host)) 
 
 def create_task_log_exception(awaitable: Awaitable) -> asyncio.Task:
     async def _log_exception(awaitable):
@@ -245,55 +227,61 @@ def create_task_log_exception(awaitable: Awaitable) -> asyncio.Task:
             return await awaitable
         except Exception as e:
             logger.exception(e)
+            #asyncio.current_task().cancel()
     return asyncio.create_task(_log_exception(awaitable))
 
 async def main():
-    tasks = [] #List[Task[None]]
     try:
-        hosts = []
-        with open(hosts_file, 'r') as file:
-            # Read each line in the file
-            for line in file:
-                if line != "":
-                    host = line.strip()
-                    hosts.append(host)
-                    logger.debug("Found host %s in %s" % (host, hosts_file))
-    except FileNotFoundError as e:
-        logger.error("File not found %s" % (hosts_file))
+        tasks = [] #List[Task[None]]
+        try:
+            hosts = []
+            with open(hosts_file, 'r') as file:
+                # Read each line in the file
+                for line in file:
+                    if line != "":
+                        host = line.strip()
+                        hosts.append(host)
+                        logger.debug("Found host %s in %s" % (host, hosts_file))
+        except FileNotFoundError as e:
+            logger.error("File not found %s" % (hosts_file))
 
-    for host in hosts:
-        con_result = test_host_connection(host)
-        if con_result:
-            logger.debug("Testing connection to %s result SUCCESS" % (host))
-            #async for event in get_idrac_sse_httpx(host):
-            #task = create_task(get_idrac_sse_httpx(host), name=host)
+        for host in hosts:
             task = create_task_log_exception(get_idrac_sse_httpx(host))
-            tasks.append(task)
-        else:
-            logger.debug("Testing connection to %s result FAILURE" % (host))        
+            tasks.append(task)       
 
-    while tasks:
-        done, pending = await asyncio.wait(
-            tasks, return_when=asyncio.FIRST_COMPLETED
-        )
-        for task in done.copy():
-            if task.exception() is not None:
-                print('Task exited with exception:')
-                task.print_stack()
-                #print('Rescheduling the task\n')
-                #coro, args, kwargs = tasks.pop(task)
-                #tasks[asyncio.create_task(coro(*args, **kwargs))] = coro, args, kwargs
-            
-            task_name = task.get_name()
-            task_host = task.hostname
-            # Remove task from list
-            tasks.pop()
-            print(f"Task completed {task_name} for host {task_host}")
-            #coro, args, kwargs = tasks.pop(0)
-            # create_task(coro)
-            await asyncio.sleep(10)
-            logger.debug(f"Restarting task {task_name} for host {task_host}")
-            task = create_task_log_exception(get_idrac_sse_httpx(task_host))
-            tasks.append(task)
+        while tasks:
+            done, pending = await asyncio.wait(
+                tasks, return_when=asyncio.FIRST_COMPLETED
+            )
+            for task in done.copy():
+                if task.exception() is not None:
+                    logger.debug('Task exited with exception: ')
+                    logger.error(task.print_stack())
+                    #print('Rescheduling the task\n')
+                    #coro, args, kwargs = tasks.pop(task)
+                    #tasks[asyncio.create_task(coro(*args, **kwargs))] = coro, args, kwargs
+                
+                task_name = task.get_name()
+                task_host = task.hostname
+                # Remove task from list
+                tasks.pop()
+                print(f"Task completed {task_name} for host {task_host}")
+                #coro, args, kwargs = tasks.pop(0)
+                # create_task(coro)
+                await asyncio.sleep(10)
+                logger.debug(f"Restarting task {task_name} for host {task_host}")
+                task = create_task_log_exception(get_idrac_sse_httpx(task_host))
+                tasks.append(task)
+
+
+            # get all tasks
+            all_tasks = asyncio.all_tasks()
+            logging.debug("Running Tasks")
+            # report all tasks
+            for task in all_tasks:
+                logger.debug(f'Running Task: {task.get_name()}, {task.get_coro()}')
+    except asyncio.CancelledError:
+        logger.debug("Task cancelled")
+        pass
         
 asyncio.run(main())

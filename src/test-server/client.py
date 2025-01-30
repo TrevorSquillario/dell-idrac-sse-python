@@ -22,49 +22,59 @@ retries = 25
                     # break
                 # yield json. loads (data_chunk.decode("utf-8"))
 
-async def iter_sse_retrying(client, method, url):
-    last_event_id = ""
-    reconnection_delay = 0.0
+# This works, non async client. Using httpx instead
+# def get_idrac_sse_sseclient():
+#     url = "https://169.254.1.1/redfish/v1/SSE?$filter=EventFormatType%20eq%20Event"
+#     events = SSEClient(url, headers={'Content-type' : 'application/json'},
+#         verify=False,
+#         timeout=None,
+#         auth=(user, password))
+#     for event in events:
+#         logger.debug(event)
 
-    # `stamina` will apply jitter and exponential backoff on top of
-    # the `retry` reconnection delay sent by the server.
-    @retry(on=httpx.ReadError, attempts=retries)
-    async def _iter_sse():
-        nonlocal last_event_id, reconnection_delay
+# async def iter_sse_retrying(client, method, url, auth):
+#     last_event_id = ""
+#     reconnection_delay = 0.0
 
-        time.sleep(reconnection_delay)
+#     # `stamina` will apply jitter and exponential backoff on top of
+#     # the `retry` reconnection delay sent by the server.
+#     @retry(on=httpx.ReadError, attempts=retries)
+#     async def _iter_sse():
+#         nonlocal last_event_id, reconnection_delay
 
-        headers = {"Accept": "text/event-stream"}
+#         time.sleep(reconnection_delay)
 
-        if last_event_id:
-            headers["Last-Event-ID"] = last_event_id
+#         headers = {"Accept": "text/event-stream"}
 
-        async with aconnect_sse(client, method, url, headers=headers) as event_source:
-            async for sse in event_source.aiter_sse():
-                last_event_id = sse.id
+#         if last_event_id:
+#             headers["Last-Event-ID"] = last_event_id
 
-                #if sse.retry is not None:
-                reconnection_delay = 10000 / 1000
+#         async with aconnect_sse(client, method, url, headers=headers, auth=auth) as event_source:
+#             async for sse in event_source.aiter_sse():
+#                 last_event_id = sse.id
 
-                yield sse
+#                 if sse.retry is not None:
+#                     reconnection_delay = sse.retry / 1000
 
-    return _iter_sse()
+#                 yield sse
 
-async def get_test_event2():
-   async with httpx.AsyncClient(verify=False, timeout=None) as client:
-        url = "http://127.0.0.1:8000/"
-        print("Connecting to %s" % (url))
-        async for sse in await iter_sse_retrying(client, "GET", url):
-        #async with aconnect_sse(client, "GET", url) as event_source:
-            #async for sse in event_source.aiter_sse():
-                print("EVENT: %s" % sse.event)
-                print("DATA: %s" % sse.data)
-                print("ID: %s" % sse.id)
-                print("RETRY: %s" % sse.retry)
-                if sse.data != None and sse.data != "":
-                    print("DEBUG: %s" % len(sse.data))
-                    event_json = json.loads(sse.data)
-                    print(json.dumps(event_json, indent=4))
+#     return _iter_sse()
+
+# async def get_test_event2():
+#    async with httpx.AsyncClient(verify=False, timeout=None) as client:
+#         url = "http://127.0.0.1:8000/"
+#         print("Connecting to %s" % (url))
+#         async for sse in await iter_sse_retrying(client, "GET", url):
+#         #async with aconnect_sse(client, "GET", url) as event_source:
+#             #async for sse in event_source.aiter_sse():
+#                 print("EVENT: %s" % sse.event)
+#                 print("DATA: %s" % sse.data)
+#                 print("ID: %s" % sse.id)
+#                 print("RETRY: %s" % sse.retry)
+#                 if sse.data != None and sse.data != "":
+#                     print("DEBUG: %s" % len(sse.data))
+#                     event_json = json.loads(sse.data)
+#                     print(json.dumps(event_json, indent=4))
 
 @retry(on=(httpx.HTTPError), attempts=retries)
 async def get_test_event():
