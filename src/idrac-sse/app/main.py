@@ -185,7 +185,7 @@ async def send_to_endpoint(event, endpoint):
 #   * Wait 10 seconds between each retry starting with 10 seconds, then up to 3600 seconds (1 hour). Stop after 86400 seconds (1 day)
 #   * The @retry tenacity decorator only gets triggered if an Exception is thrown
 ###
-@retry(wait=wait_exponential(multiplier=10, min=10, max=3600), stop=stop_after_delay(30))
+@retry(wait=wait_exponential(multiplier=10, min=10, max=3600), stop=stop_after_delay(86400))
 async def get_idrac_sse_httpx(host):
     # Set dynamic property for current task that stores the hostname
     current_task = asyncio.current_task()
@@ -227,7 +227,6 @@ def create_task_log_exception(awaitable: Awaitable) -> asyncio.Task:
             return await awaitable
         except Exception as e:
             logger.exception(e)
-            #asyncio.current_task().cancel()
     return asyncio.create_task(_log_exception(awaitable))
 
 async def main():
@@ -253,7 +252,7 @@ async def main():
             done, pending = await asyncio.wait(
                 tasks, return_when=asyncio.FIRST_COMPLETED
             )
-            for task in done.copy():
+            for task in done:
                 if task.exception() is not None:
                     logger.debug('Task exited with exception: ')
                     logger.error(task.print_stack())
@@ -264,22 +263,22 @@ async def main():
                 task_name = task.get_name()
                 task_host = task.hostname
                 # Remove task from list
-                tasks.pop()
                 print(f"Task completed {task_name} for host {task_host}")
                 #coro, args, kwargs = tasks.pop(0)
                 # create_task(coro)
                 await asyncio.sleep(10)
                 logger.debug(f"Restarting task {task_name} for host {task_host}")
-                task = create_task_log_exception(get_idrac_sse_httpx(task_host))
-                tasks.append(task)
+                new_task = create_task_log_exception(get_idrac_sse_httpx(task_host))
+                tasks.append(new_task)
+                task.cancel()
+                tasks.pop()
 
-
-            # get all tasks
+            # Show running tasks
             all_tasks = asyncio.all_tasks()
             logging.debug("Running Tasks")
-            # report all tasks
             for task in all_tasks:
                 logger.debug(f'Running Task: {task.get_name()}, {task.get_coro()}')
+
     except asyncio.CancelledError:
         logger.debug("Task cancelled")
         pass
