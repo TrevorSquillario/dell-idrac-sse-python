@@ -13,7 +13,7 @@ services:
       context: ./src/idrac-sse
     restart: unless-stopped
     environment:
-      - LOGLEVEL=INFO
+      - LOGLEVEL=DEBUG
       - iDRAC_USERNAME=root
       - iDRAC_PASSWORD
       - OTEL_RECEIVER=http://${OTEL_COLLECTOR_HOST}:${OTEL_COLLECTOR_PORT_HTTP}

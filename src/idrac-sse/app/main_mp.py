@@ -14,6 +14,8 @@ from httpx_sse import connect_sse, aconnect_sse
 from tenacity import retry, stop_after_attempt, stop_after_delay, wait_exponential
 from datetime import datetime
 
+from multiprocessing import Process, Manager 
+
 import idrac_redfish as idrac
 import utils
 
@@ -70,17 +72,34 @@ async def main():
         except FileNotFoundError as e:
             logger.error("File not found %s" % (hosts_file))
 
-        # Start SSE task for each host
-        for host in hosts:
-            #reports = idrac.get_attributes(host, idrac_username, idrac_password)
-            #reports_to_enable = ["PowerMetrics", "ThermalMetrics", "ThermalSensor", "Sensor", "SystemUsage", "StorageDiskSMARTData"] 
-            #idrac.set_attributes(host, idrac_username, idrac_password, attributes=reports, filter=reports_to_enable, enable=True)
-            task1 = utils.create_task_log_exception(idrac.get_idrac_sse_httpx(host=host, sse_type="event", user=idrac_username, passwd=idrac_password))
-            task2 = utils.create_task_log_exception(idrac.get_idrac_sse_httpx(host=host, sse_type="metric", user=idrac_username, passwd=idrac_password))
-            tasks.append(task1)       
-            tasks.append(task2)       
-
         # Monitor tasks
+        with Manager() as manager: 
+            # Create a queue within the context of the manager 
+            q = manager.Queue() 
+
+            # Start SSE task for each host
+            for host in hosts:
+                #reports = idrac.get_attributes(host, idrac_username, idrac_password)
+                #reports_to_enable = ["PowerMetrics", "ThermalMetrics", "ThermalSensor", "Sensor", "SystemUsage", "StorageDiskSMARTData"] 
+                #idrac.set_attributes(host, idrac_username, idrac_password, attributes=reports, filter=reports_to_enable, enable=True)
+                task1 = utils.create_task_log_exception(idrac.get_idrac_sse_httpx(host=host, sse_type="event", user=idrac_username, passwd=idrac_password))
+                task2 = utils.create_task_log_exception(idrac.get_idrac_sse_httpx(host=host, sse_type="metric", user=idrac_username, passwd=idrac_password))
+                tasks.append(task1)       
+                tasks.append(task2)     
+    
+                # Create two instances of the Process class, one for each function 
+                p1 = Process(target=utils.create_task_log_exception, args=(idrac.ge)t_idrac_sse_httpx(host=host, sse_type="event", user=idrac_username, passwd=idrac_password)) 
+                p2 = Process(target=utils.create_task_log_exception, args=(idrac.get_idrac_sse_httpx(host=host, sse_type="metric", user=idrac_username, passwd=idrac_password)))
+        
+                # Start both processes 
+                p1.start() 
+                p2.start() 
+        
+                # Wait for both processes to finish 
+                p1.join() 
+                p2.join() 
+
+
         while tasks:
             done, pending = await asyncio.wait(
                 tasks, return_when=asyncio.FIRST_COMPLETED

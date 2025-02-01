@@ -11,7 +11,7 @@ from typing import Iterator
 #from sseclient import SSEClient
 from httpx_sse import connect_sse, aconnect_sse
 #from stamina import retry
-from tenacity import retry, stop_after_attempt, stop_after_delay, wait_exponential
+from tenacity import retry, stop_after_attempt, stop_after_delay, wait_exponential, after_log
 from datetime import datetime
 import otel
 import utils
@@ -58,8 +58,8 @@ async def send_to_endpoint(event, endpoint):
             response = await client.post(endpoint, 
                                             json=event,
                                             headers={"Content-Type": "application/json"})
-            logger.debug(response.status_code)
-            logger.debug(response.json())
+            logger.debug(f"Endpoint {endpoint} response status code {response.status_code}")
+            logger.debug(f"Endpoint {endpoint} response json {response.json()}")
             if response.status_code == 200:
                 return True
             else:
@@ -68,6 +68,18 @@ async def send_to_endpoint(event, endpoint):
                 response.raise_for_status()
     except Exception as e:
         logger.exception(e)
+
+async def otlp_send(event, endpoint, sse_type):
+    if sse_type == "event":
+        otlp_log_event = await otel.convert_redfish_log_event_to_otlp(event)
+        logger.debug(json.dumps(otlp_log_event, indent=4))
+        otel_receiver_logs = f"{endpoint}/v1/logs"
+        await send_to_endpoint(otlp_log_event, otel_receiver_logs)
+    elif sse_type == "metric":
+        otlp_metric_event = await otel.convert_redfish_metric_event_to_otlp(event)
+        logger.debug(json.dumps(otlp_metric_event, indent=4))
+        otel_receiver_metrics = f"{endpoint}/v1/metrics"
+        await send_to_endpoint(otlp_metric_event, otel_receiver_metrics)
 
 def get_attributes(host, user, passwd):
     """ 
@@ -126,7 +138,7 @@ def set_attributes(host, user, passwd, attributes, filter, enable: bool):
 #   * Wait 10 seconds between each retry starting with 10 seconds, then up to 3600 seconds (1 hour). Stop after 86400 seconds (1 day)
 #   * The @retry tenacity decorator only gets triggered if connection is established and Exception is thrown
 ###
-@retry(wait=wait_exponential(multiplier=10, min=10, max=3600), stop=stop_after_delay(86400)) #, reraise=True
+@retry(wait=wait_exponential(multiplier=10, min=10, max=3600), stop=stop_after_delay(86400), after=after_log(logger, logging.DEBUG)) #, reraise=True
 async def get_idrac_sse_httpx(host, user, passwd, sse_type: str = "event"):
     # Set dynamic property for current task that stores the hostname
     current_task = asyncio.current_task()
@@ -151,21 +163,29 @@ async def get_idrac_sse_httpx(host, user, passwd, sse_type: str = "event"):
                         logger.info("Processing SSE event...")
                         event_json = json.loads(sse.data)
                         logger.debug(json.dumps(event_json, indent=4))
+                        subtasks = []
                         # Send to OpenTelemetry Collector OTLP HTTP Receiver at [otel_collector_address]/v1/logs
                         if otel_receiver != None and otel_receiver != "":
                             logger.info(f"OTEL Receiver Configured: {otel_receiver}")
                             logger.info(f"SSE Event Type: {sse_type}")
                             try: 
-                                if sse_type == "event":
-                                    otlp_log_event = await otel.convert_redfish_log_event_to_otlp(event_json)
-                                    logger.debug(json.dumps(otlp_log_event, indent=4))
-                                    otel_receiver_logs = f"{otel_receiver}/v1/logs"
-                                    utils.create_task_log_exception(send_to_endpoint(otlp_log_event, otel_receiver_logs))
-                                elif sse_type == "metric":
-                                    otlp_metric_event = await otel.convert_redfish_metric_event_to_otlp(event_json)
-                                    logger.debug(json.dumps(otlp_metric_event, indent=4))
-                                    otel_receiver_metrics = f"{otel_receiver}/v1/metrics"
-                                    utils.create_task_log_exception(send_to_endpoint(otlp_metric_event, otel_receiver_metrics))
+                                # Since this is a subtask within a running task so we need to wait the coroutine for it to process properly
+                                subtask1 = utils.create_task_log_exception(otlp_send(event=event_json, endpoint=otel_receiver, sse_type=sse_type))
+                                subtasks.append(subtask1)
+                                while subtasks:
+                                    done, pending = await asyncio.wait(
+                                        subtasks, return_when=asyncio.FIRST_COMPLETED
+                                    )
+                                    for task in done:
+                                        if task.exception() is not None:
+                                            logger.error('Task exited with exception: ')
+                                            logger.error(task.print_stack())
+                                        
+                                        task_name = task.get_name()
+                                        logger.debug(f"Subtask completed {task_name}")
+                                        task.cancel()
+                                        subtasks.pop()
+
                             except Exception as e:
                                 logger.exception(e)
                             
@@ -173,6 +193,5 @@ async def get_idrac_sse_httpx(host, user, passwd, sse_type: str = "event"):
                         if http_receiver != None and http_receiver != "":
                             result = await send_to_endpoint(event_json, http_receiver)
 
-                        #yield event_json
     else:
         logger.error("Testing connection to %s result FAILURE" % (host)) 

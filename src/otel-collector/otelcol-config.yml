@@ -15,9 +15,9 @@ receivers:
 
 exporters:
   debug:
-    verbosity: detailed
-    sampling_initial: 5
-    sampling_thereafter: 200
+    #verbosity: detailed
+    #sampling_initial: 5
+    #sampling_thereafter: 200
 
 processors:
   batch:
