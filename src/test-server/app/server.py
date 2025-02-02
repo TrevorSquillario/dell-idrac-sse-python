@@ -7,6 +7,7 @@ from fastapi.responses import JSONResponse
 from fastapi.middleware.httpsredirect import HTTPSRedirectMiddleware
 import json
 import ssl
+import os
 import logging
 import random
 import time
@@ -25,18 +26,31 @@ app.add_middleware(HTTPSRedirectMiddleware)
 #         yield json.dumps ({"event_id": i, "data": f"{i + 1} chunk of data", "is_final_event": i == 9}) + '\n' 
 #         await asyncio.sleep(1)
 
+
+
+def get_files(event_type):
+    directory_path = ""
+    files = []
+    if event_type == "Event":
+        directory_path = "app/example_logs"
+    else:
+        directory_path = "app/example_metrics"
+
+    for filename in os.listdir(directory_path):
+        file_path = os.path.join(directory_path, filename)
+        if os.path.isfile(file_path):
+            print(f"Found file: {file_path}")
+            files.append(file_path)
+
+    return files
+
 async def idrac_generator(event_type):
     for i in range(random.randint(1,1000)):
-        if event_type == "Event":
-            with open('app/example_log.json') as f:
-                idrac_sse_log_json = json.load(f)
-                yield json.dumps (idrac_sse_log_json) + '\n' 
-        else:
-            example_metrics = ["example_metric1.json", "example_metric2.json"]
-            example_metric = random.choice(example_metrics)
-            with open(f"app/{example_metric}") as f:
-                idrac_sse_metric_json = json.load(f)
-                yield json.dumps (idrac_sse_metric_json) + '\n' 
+        files = get_files(event_type)
+        file = random.choice(files)
+        with open(file) as f:
+            idrac_sse_example_json = json.load(f)
+            yield json.dumps (idrac_sse_example_json) + '\n'
         await asyncio.sleep(random.randint(1,10))
 
 @app.get('/redfish/v1/Managers/iDRAC.Embedded.1')

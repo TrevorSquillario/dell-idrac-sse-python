@@ -7,18 +7,16 @@ from typing import List, Awaitable
 import logging
 import traceback
 import time
+import utils
 from typing import Iterator
 #from sseclient import SSEClient
 from httpx_sse import connect_sse, aconnect_sse
 #from stamina import retry
 from tenacity import retry, stop_after_attempt, stop_after_delay, wait_exponential, after_log
 from datetime import datetime
-import otel
-import utils
-import stomp 
-from otel_pump import EventListener, MetricListener
+import otel_pump
 
-logger = logging.getLogger('idrac-sse')
+logger = logging.getLogger(__name__)
 
 timeout = httpx.Timeout(10.0, read=None)
 transport = httpx.HTTPTransport(verify=False, retries=10)
@@ -27,20 +25,6 @@ idrac_username = os.environ.get('iDRAC_USERNAME')
 idrac_password = os.environ.get('iDRAC_PASSWORD')
 otel_receiver = os.environ.get('OTEL_RECEIVER') 
 http_receiver = os.environ.get('HTTP_RECEIVER')
-
-topic_event = "otel/event"
-topic_metric = "otel/metric"
-try:
-    logger.info(f"Connecting to activemq server")
-    con = stomp.Connection([("activemq", 61613)])
-    event_listener = EventListener()
-    metric_listener = MetricListener()
-    con.set_listener("event", event_listener)
-    con.set_listener("metric", metric_listener)
-    con.connect("admin", "admin", wait=True)
-except Exception as e:
-    logger.error("Could not connect to activemq server")
-    logger.exception(e)
 
 def test_host_connection(host):
     url = "https://%s/redfish/v1/Managers/iDRAC.Embedded.1" % (host)
@@ -66,39 +50,6 @@ async def test_host_connection_async(host):
         else:
             logger.error(response.json())
             return False
-
-def send_to_endpoint(event, endpoint):
-    logger.info(f"Sending event to {endpoint}")
-    try:
-        with httpx.Client(transport=transport, timeout=timeout) as client:
-            response = client.post(endpoint, 
-                                            json=event,
-                                            headers={"Content-Type": "application/json"})
-            logger.debug(f"Endpoint {endpoint} response status code {response.status_code}")
-            logger.debug(f"Endpoint {endpoint} response json {response.json()}")
-            if response.status_code == 200:
-                return True
-            else:
-                # Throw exception on status codes > 200
-                # * You don't normally need to worry about checking for 200. However, this seems to get triggered on 200
-                response.raise_for_status()
-    except Exception as e:
-        logger.exception(e)
-
-def otlp_send(event, endpoint, sse_type):
-    otlp_event = ""
-    otlp_endpoint = ""
-    if sse_type == "event":
-        topic = topic_event
-        otlp_event = otel.convert_redfish_log_event_to_otlp(event)
-    elif sse_type == "metric":
-        topic = topic_metric
-        otlp_event = otel.convert_redfish_metric_event_to_otlp(event)
-        otlp_endpoint = f"{endpoint}/v1/metrics"
-
-    logger.info(f"Sending event to kafka topic {topic}")
-    logger.debug(json.dumps(otlp_event, indent=4))
-    con.send(body=json.dumps(otlp_event), destination=topic)  
 
 def get_attributes(host, user, passwd):
     """ 
@@ -183,14 +134,13 @@ def get_idrac_sse_httpx(host, user, passwd, sse_type: str = "event"):
                             logger.info(f"OTEL Receiver Configured: {otel_receiver}")
                             logger.info(f"SSE Event Type: {sse_type}")
                             try: 
-                                otlp_send(event_json, otel_receiver, sse_type)
-                                con.subscribe(topic_event, "idrac-sse")
+                                otel_pump.otlp_send(event_json, otel_receiver, sse_type)
                             except Exception as e:
                                 logger.exception(e)
                             
                         # Send to other HTTP endpoint
                         if http_receiver != None and http_receiver != "":
-                            result = send_to_endpoint(event_json, http_receiver)
+                            result = utils.send_to_endpoint(event_json, http_receiver, transport=transport, timeout=timeout)
 
     else:
         logger.error("Testing connection to %s result FAILURE" % (host)) 

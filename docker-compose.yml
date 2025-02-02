@@ -37,6 +37,8 @@ services:
       - 8443:443
     networks:
       - idrac-sse-demo
+    volumes:
+      - /tmp/reports:/code/app/example_metrics
 
   otel-collector:
     image: ghcr.io/open-telemetry/opentelemetry-collector-releases/opentelemetry-collector-contrib:latest

@@ -5,3 +5,4 @@ requests
 httpx_sse
 tenacity
 stomp.py    
+pandas

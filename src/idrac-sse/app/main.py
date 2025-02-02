@@ -5,6 +5,7 @@ import asyncio
 from asyncio import Task, create_task
 from typing import List, Awaitable
 import logging
+import logging.config
 import traceback
 import time
 from typing import Iterator
@@ -20,19 +21,65 @@ import idrac_redfish as idrac
 import utils
 
 hosts_file = os.environ.get('HOSTS_FILE', default="app/hosts")
-loglevel = os.environ.get('LOGLEVEL')
+loglevel_str = os.environ.get('LOGLEVEL', default='INFO')
+loglevel = getattr(logging, loglevel_str, "INFO")
 idrac_username = os.environ.get('iDRAC_USERNAME')
 idrac_password = os.environ.get('iDRAC_PASSWORD')
 otel_receiver = os.environ.get('OTEL_RECEIVER')
 http_receiver = os.environ.get('HTTP_RECEIVER')
 
-logger = logging.getLogger('idrac-sse')
-handler = logging.StreamHandler()
-formatter = logging.Formatter(
-    '%(asctime)s [%(name)-12s] %(levelname)-8s %(message)s')
-handler.setFormatter(formatter)
-logger.addHandler(handler)
-logger.setLevel(getattr(logging, loglevel, "INFO"))
+LOGGING_CONFIG = { 
+    'version': 1,
+    'formatters': { 
+        'standard': { 
+            'format': '%(asctime)s [%(levelname)s] %(name)s: %(message)s'
+        },
+    },
+    'handlers': { 
+        'default': { 
+            'class': 'logging.StreamHandler',
+            'formatter': 'standard',
+            'level': loglevel,
+        },
+    },
+    'loggers': {
+        '': {  # root logger
+            'handlers': ['default'],
+            'level': loglevel,
+        },
+        'idrac_redfish': {  # root logger
+            'handlers': ['default'],
+            'level': loglevel,
+            'propagate': False
+        },
+        'listener_stats': {  # root logger
+            'handlers': ['default'],
+            'level': loglevel,
+            'propagate': False
+        },
+        'mb': {  # root logger
+            'handlers': ['default'],
+            'level': loglevel,
+            'propagate': False
+        },
+        'otel_pump': {  # root logger
+            'handlers': ['default'],
+            'level': loglevel,
+            'propagate': False
+        },
+        'utils': {  # root logger
+            'handlers': ['default'],
+            'level': loglevel,
+            'propagate': False
+        },
+    },
+}
+
+# Run once at startup:
+logging.config.dictConfig(LOGGING_CONFIG)
+
+logger = logging.getLogger()
+#logger.setLevel(getattr(logging, loglevel, "INFO"))
 
 async def every(__seconds: float, func, *args, **kwargs):
     while True:
