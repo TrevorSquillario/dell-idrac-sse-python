@@ -102,7 +102,7 @@ otlp_metricrecord_datapoint = """
 }
 """
 
-async def convert_redfish_metric_event_to_otlp(redfish_event):
+def convert_redfish_metric_event_to_otlp(redfish_event):
     """
         Convert Redfish payload to OTLP JSON format 
         https://github.com/open-telemetry/opentelemetry-proto/blob/v1.5.0/examples/metrics.json
@@ -171,7 +171,7 @@ async def convert_redfish_metric_event_to_otlp(redfish_event):
 
     return otlp
 
-async def convert_redfish_log_event_to_otlp(redfish_event):
+def convert_redfish_log_event_to_otlp(redfish_event):
     """
         Convert Redfish payload to OTLP JSON format 
         https://github.com/open-telemetry/opentelemetry-proto/blob/v1.5.0/examples/logs.json

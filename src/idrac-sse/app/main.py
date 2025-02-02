@@ -14,6 +14,8 @@ from httpx_sse import connect_sse, aconnect_sse
 from tenacity import retry, stop_after_attempt, stop_after_delay, wait_exponential
 from datetime import datetime
 
+from multiprocessing import Process 
+
 import idrac_redfish as idrac
 import utils
 
@@ -47,16 +49,10 @@ def get_running_tasks():
         event_type = getattr(task, 'event_type', 'None')
         logger.info(f'Running Task: {task.get_name()}, {hostname}, {event_type}, {task.get_coro()}')
 
-async def main():
+def main():
     try:
         logger.info(f"Log level: {logger.level}")
-        # Log running tasks
-        if logger.level == logging.DEBUG:
-            asyncio.create_task(every(10, get_running_tasks, None))
-        elif logger.level == logging.INFO:
-            asyncio.create_task(every(60, get_running_tasks, None))
-
-        tasks = [] #List[Task[None]]
+        processes = [] 
         # Read hosts from file
         try:
             hosts = []
@@ -74,40 +70,21 @@ async def main():
         for host in hosts:
             #reports = idrac.get_attributes(host, idrac_username, idrac_password)
             #reports_to_enable = ["PowerMetrics", "ThermalMetrics", "ThermalSensor", "Sensor", "SystemUsage", "StorageDiskSMARTData"] 
-            #idrac.set_attributes(host, idrac_username, idrac_password, attributes=reports, filter=reports_to_enable, enable=True)
-            task1 = utils.create_task_log_exception(idrac.get_idrac_sse_httpx(host=host, sse_type="event", user=idrac_username, passwd=idrac_password))
-            task2 = utils.create_task_log_exception(idrac.get_idrac_sse_httpx(host=host, sse_type="metric", user=idrac_username, passwd=idrac_password))
-            tasks.append(task1)       
-            tasks.append(task2)       
+            #idrac.set_attributes(host, idrac_username, idrac_password, attributes=reports, filter=reports_to_enable, enable=True) 
 
-        # Monitor tasks
-        while tasks:
-            done, pending = await asyncio.wait(
-                tasks, return_when=asyncio.FIRST_COMPLETED
-            )
-            for task in done:
-                if task.exception() is not None:
-                    logger.error('Task exited with exception: ')
-                    logger.error(task.print_stack())
-                    #print('Rescheduling the task\n')
-                    #coro, args, kwargs = tasks.pop(task)
-                    #tasks[asyncio.create_task(coro(*args, **kwargs))] = coro, args, kwargs
-                
-                task_name = task.get_name()
-                task_host = task.hostname
-                task_event_type = task.event_type
-                logger.info(f"Task completed {task_name} for host {task_host}")
-                task.cancel()
-                tasks.pop()
-                await asyncio.sleep(10)
-                logger.info(f"Restarting task {task_name} for host {task_host}")
-                new_task = utils.create_task_log_exception(idrac.get_idrac_sse_httpx(host=host, sse_type=task.event_type, user=idrac_username, passwd=idrac_password))
-                tasks.append(new_task)
+            # Create two instances of the Process class, one for each function 
+            p1 = Process(target=idrac.get_idrac_sse_httpx, args=(host, idrac_username, idrac_password, "event"))
+            p2 = Process(target=idrac.get_idrac_sse_httpx, args=(host, idrac_username, idrac_password, "metric"))
+            processes.append(p1)
+            processes.append(p2)
+            p1.start()
+            p2.start()
 
-    except asyncio.CancelledError:
-        logger.info("Task cancelled")
-        pass
+            #for p in processes:
+            #    p.join()
+    
     except Exception as e:
         logger.exception(e)
         
-asyncio.run(main())
+if __name__ == '__main__':
+    main()

@@ -13,14 +13,17 @@ services:
       context: ./src/idrac-sse
     restart: unless-stopped
     environment:
-      - LOGLEVEL=DEBUG
+      - LOGLEVEL=INFO
       - iDRAC_USERNAME=root
       - iDRAC_PASSWORD
       - OTEL_RECEIVER=http://${OTEL_COLLECTOR_HOST}:${OTEL_COLLECTOR_PORT_HTTP}
       - HTTP_RECEIVER
     volumes:
+      #- ./hosts_test:/code/app/hosts
       - ./hosts:/code/app/hosts
-    #network_mode: host
+    depends_on:
+      activemq:
+        condition: service_healthy
     networks:
       - idrac-sse-demo
 
@@ -59,6 +62,28 @@ services:
       - OTEL_COLLECTOR_HOST
       - OTEL_COLLECTOR_PORT_GRPC
       - OTEL_COLLECTOR_PORT_HTTP
+    networks:
+      - idrac-sse-demo
+
+  activemq:
+    container_name: activemq
+    image: rmohr/activemq:latest
+    environment:
+      ACTIVEMQ_WEBADMIN_USERNAME: admin
+      ACTIVEMQ_WEBADMIN_PASSWORD: admin
+      ACTIVEMQ_USER: admin
+      ACTIVEMQ_PASSWORD: admin
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+    ports:
+      - "61616:61616"  # OpenWire port
+      - "61613:61613"  # STOMP port
+      - "8161:8161"    # WebConsole port
+    healthcheck:
+      test: ["CMD-SHELL", "curl -k -f http://localhost:8161"]
+      interval: 5s
     networks:
       - idrac-sse-demo
 

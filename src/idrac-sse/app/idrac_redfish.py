@@ -15,16 +15,32 @@ from tenacity import retry, stop_after_attempt, stop_after_delay, wait_exponenti
 from datetime import datetime
 import otel
 import utils
+import stomp 
+from otel_pump import EventListener, MetricListener
 
 logger = logging.getLogger('idrac-sse')
 
 timeout = httpx.Timeout(10.0, read=None)
-transport = httpx.AsyncHTTPTransport(verify=False, retries=10)
+transport = httpx.HTTPTransport(verify=False, retries=10)
 
 idrac_username = os.environ.get('iDRAC_USERNAME')
 idrac_password = os.environ.get('iDRAC_PASSWORD')
-otel_receiver = os.environ.get('OTEL_RECEIVER')
+otel_receiver = os.environ.get('OTEL_RECEIVER') 
 http_receiver = os.environ.get('HTTP_RECEIVER')
+
+topic_event = "otel/event"
+topic_metric = "otel/metric"
+try:
+    logger.info(f"Connecting to activemq server")
+    con = stomp.Connection([("activemq", 61613)])
+    event_listener = EventListener()
+    metric_listener = MetricListener()
+    con.set_listener("event", event_listener)
+    con.set_listener("metric", metric_listener)
+    con.connect("admin", "admin", wait=True)
+except Exception as e:
+    logger.error("Could not connect to activemq server")
+    logger.exception(e)
 
 def test_host_connection(host):
     url = "https://%s/redfish/v1/Managers/iDRAC.Embedded.1" % (host)
@@ -51,11 +67,11 @@ async def test_host_connection_async(host):
             logger.error(response.json())
             return False
 
-async def send_to_endpoint(event, endpoint):
+def send_to_endpoint(event, endpoint):
     logger.info(f"Sending event to {endpoint}")
     try:
-        async with httpx.AsyncClient(transport=transport, timeout=timeout) as client:
-            response = await client.post(endpoint, 
+        with httpx.Client(transport=transport, timeout=timeout) as client:
+            response = client.post(endpoint, 
                                             json=event,
                                             headers={"Content-Type": "application/json"})
             logger.debug(f"Endpoint {endpoint} response status code {response.status_code}")
@@ -69,17 +85,20 @@ async def send_to_endpoint(event, endpoint):
     except Exception as e:
         logger.exception(e)
 
-async def otlp_send(event, endpoint, sse_type):
+def otlp_send(event, endpoint, sse_type):
+    otlp_event = ""
+    otlp_endpoint = ""
     if sse_type == "event":
-        otlp_log_event = await otel.convert_redfish_log_event_to_otlp(event)
-        logger.debug(json.dumps(otlp_log_event, indent=4))
-        otel_receiver_logs = f"{endpoint}/v1/logs"
-        await send_to_endpoint(otlp_log_event, otel_receiver_logs)
+        topic = topic_event
+        otlp_event = otel.convert_redfish_log_event_to_otlp(event)
     elif sse_type == "metric":
-        otlp_metric_event = await otel.convert_redfish_metric_event_to_otlp(event)
-        logger.debug(json.dumps(otlp_metric_event, indent=4))
-        otel_receiver_metrics = f"{endpoint}/v1/metrics"
-        await send_to_endpoint(otlp_metric_event, otel_receiver_metrics)
+        topic = topic_metric
+        otlp_event = otel.convert_redfish_metric_event_to_otlp(event)
+        otlp_endpoint = f"{endpoint}/v1/metrics"
+
+    logger.info(f"Sending event to kafka topic {topic}")
+    logger.debug(json.dumps(otlp_event, indent=4))
+    con.send(body=json.dumps(otlp_event), destination=topic)  
 
 def get_attributes(host, user, passwd):
     """ 
@@ -139,28 +158,23 @@ def set_attributes(host, user, passwd, attributes, filter, enable: bool):
 #   * The @retry tenacity decorator only gets triggered if connection is established and Exception is thrown
 ###
 @retry(wait=wait_exponential(multiplier=10, min=10, max=3600), stop=stop_after_delay(86400), after=after_log(logger, logging.DEBUG)) #, reraise=True
-async def get_idrac_sse_httpx(host, user, passwd, sse_type: str = "event"):
-    # Set dynamic property for current task that stores the hostname
-    current_task = asyncio.current_task()
-    current_task.hostname = host
-    current_task.event_type = sse_type
-    logger.info(f"Running Task for host {host}: {current_task}")
-    con_result = await test_host_connection_async(host)
-    #con_result = test_host_connection(host)
+def get_idrac_sse_httpx(host, user, passwd, sse_type: str = "event"):
+    logger.info(f"Running Task for host {host}")
+    con_result = test_host_connection(host)
     if con_result:
         logger.info("Testing connection to %s result SUCCESS" % (host))
-        async with httpx.AsyncClient(transport=transport, timeout=timeout) as client:
+        with httpx.Client(transport=transport, timeout=timeout) as client:
             if sse_type == "event":
                 url = "https://%s/redfish/v1/SSE?$filter=EventFormatType eq Event" % (host)
             elif sse_type == "metric":
                 url = "https://%s/redfish/v1/SSE?$filter=EventFormatType eq MetricReport" % (host)
             logger.info("Opening SSE connection to %s" % (url))
-            async with aconnect_sse(client, "GET", url, auth=(user, passwd)) as event_source:
+            with connect_sse(client, "GET", url, auth=(user, passwd)) as event_source:
                 # Throw exception on status codes > 200
                 event_source.response.raise_for_status()
-                async for sse in event_source.aiter_sse():
+                for sse in event_source.iter_sse():
                     if sse.data != None and sse.data != "":
-                        logger.info("Processing SSE event...")
+                        logger.info(f"Processing SSE event Type={sse_type}")
                         event_json = json.loads(sse.data)
                         logger.debug(json.dumps(event_json, indent=4))
                         subtasks = []
@@ -169,29 +183,14 @@ async def get_idrac_sse_httpx(host, user, passwd, sse_type: str = "event"):
                             logger.info(f"OTEL Receiver Configured: {otel_receiver}")
                             logger.info(f"SSE Event Type: {sse_type}")
                             try: 
-                                # Since this is a subtask within a running task so we need to wait the coroutine for it to process properly
-                                subtask1 = utils.create_task_log_exception(otlp_send(event=event_json, endpoint=otel_receiver, sse_type=sse_type))
-                                subtasks.append(subtask1)
-                                while subtasks:
-                                    done, pending = await asyncio.wait(
-                                        subtasks, return_when=asyncio.FIRST_COMPLETED
-                                    )
-                                    for task in done:
-                                        if task.exception() is not None:
-                                            logger.error('Task exited with exception: ')
-                                            logger.error(task.print_stack())
-                                        
-                                        task_name = task.get_name()
-                                        logger.debug(f"Subtask completed {task_name}")
-                                        task.cancel()
-                                        subtasks.pop()
-
+                                otlp_send(event_json, otel_receiver, sse_type)
+                                con.subscribe(topic_event, "idrac-sse")
                             except Exception as e:
                                 logger.exception(e)
                             
                         # Send to other HTTP endpoint
                         if http_receiver != None and http_receiver != "":
-                            result = await send_to_endpoint(event_json, http_receiver)
+                            result = send_to_endpoint(event_json, http_receiver)
 
     else:
         logger.error("Testing connection to %s result FAILURE" % (host)) 
