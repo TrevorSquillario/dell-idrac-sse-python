@@ -15,6 +15,7 @@ from httpx_sse import connect_sse, aconnect_sse
 from tenacity import retry, stop_after_attempt, stop_after_delay, wait_exponential, after_log
 from datetime import datetime
 import otel_pump
+import listener_stats
 
 logger = logging.getLogger(__name__)
 
@@ -135,6 +136,9 @@ def get_idrac_sse_httpx(host, user, passwd, sse_type: str = "event"):
                             logger.info(f"SSE Event Type: {sse_type}")
                             try: 
                                 otel_pump.otlp_send(event_json, otel_receiver, sse_type)
+                                #listener_stats.add_redfish_lister_stats(event_json, f"send_{sse_type}")
+                                #stat = listener_stats.convert_redfish_event_to_stat(event_json, f"send_{sse_type}_total")
+                                #otel_pump.otlp_send_stat(stat, otel_receiver)
                             except Exception as e:
                                 logger.exception(e)
                             

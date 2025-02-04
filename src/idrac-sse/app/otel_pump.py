@@ -1,22 +1,21 @@
-import stomp 
 import os
 import logging
 import json
 import httpx
-import asyncio
 from datetime import datetime
-import idrac_redfish as idrac
-import listener_stats
-from mb import StompConnection
+import pytz
+from mb import StompConnection, topic_event, topic_metric, topic_stat
+from models import Stat
 
 otel_receiver = os.environ.get('OTEL_RECEIVER')
-topic_event = "otel/event"
-topic_metric = "otel/metric"
+tz = os.environ.get("TZINFO")
 
 logger = logging.getLogger(__name__)
 
 timeout = httpx.Timeout(10.0, read=None)
 transport = httpx.HTTPTransport(verify=False, retries=10)
+
+stomp_conn = StompConnection(host="activemq", port=61613, user='admin', password='admin', transport=transport, timeout=timeout)
 
 otlp_log_json = """{
   "resourceLogs": [
@@ -95,7 +94,7 @@ otlp_metric_json = """
 }
 """
 
-otlp_metricrecord = """
+otlp_metricrecord_guage = """
 {
   "name": "my.gauge",
   "description": "I am a Gauge",
@@ -113,6 +112,15 @@ otlp_metricrecord_datapoint = """
 }
 """
 
+def convert_utc_to_nano(utc_dt):
+    """Converts a UTC datetime object to local time."""
+    local_timezone = pytz.timezone(tz)
+    local_time = utc_dt.replace(tzinfo=pytz.utc).astimezone(local_timezone)
+    logger.debug(f"Converted datetime from UTC {utc_dt} to {tz} {local_time}")
+    local_timestamp = local_time.timestamp()
+    local_timestamp_nano = int(local_timestamp * 1e9)
+    return local_timestamp_nano
+
 def convert_redfish_metric_event_to_otlp(redfish_event):
     """
         Convert Redfish payload to OTLP JSON format 
@@ -129,10 +137,17 @@ def convert_redfish_metric_event_to_otlp(redfish_event):
       timestamp = redfish_event["Timestamp"]
       #mrd = redfish_event["MetricReportDefinition"]
 
-      server_servicetag = redfish_event["Oem"]["Dell"]["ServiceTag"]
-      server_idrac_version = redfish_event["Oem"]["Dell"]["iDRACFirmwareVersion"]
+      server_servicetag = ""
+      server_idrac_version = ""
+      if redfish_event.get("Oem"):
+          server_servicetag = redfish_event.get("Oem").get("Dell").get("ServiceTag")
+          server_idrac_version = redfish_event.get("Oem").get("Dell").get("iDRACFirmwareVersion")
       metrics = redfish_event["MetricValues"]
       metrics_count = redfish_event["MetricValues@odata.count"]
+
+      # Generate Stat object to monitor statistics 
+      stat = Stat(name="send_metric_count", odata_type=odata_type, event_id=odata_id, event_count=len(metrics))
+      stat_metric = convert_stat_to_otlp_metric(stat.toJson())
 
       resource_attribute = json.loads(otlp_attribute)
       resource_attribute["key"] = "serverServiceTag"
@@ -140,26 +155,37 @@ def convert_redfish_metric_event_to_otlp(redfish_event):
       otlp["resourceMetrics"][0]["resource"]["attributes"].append(resource_attribute)
 
       otlp["resourceMetrics"][0]["scopeMetrics"][0]["scope"]["name"] = "idrac.MetricReport" #odata_context
-      otlp["resourceMetrics"][0]["scopeMetrics"][0]["scope"]["version"] = odata_type
+      otlp["resourceMetrics"][0]["scopeMetrics"][0]["scope"]["version"] = "1.5.0" #odata_type
 
       for metric in metrics:
           metric_id = metric["MetricId"]
-          metric_timestamp_str = metric["Timestamp"]
+          metric_timestamp_str = metric.get("Timestamp")
           metric_value = metric["MetricValue"]
-          metric_property = metric["MetricProperty"]
-          metric_type = metric["Oem"]["Dell"].get("@odata.type")
-          metric_context_id = metric["Oem"]["Dell"].get("ContextID")
-          metric_label = metric["Oem"]["Dell"].get("Label")
-          metric_source = metric["Oem"]["Dell"].get("Source")
-          metric_fqdd = metric["Oem"]["Dell"].get("FQDD")
+          #metric_property = metric["MetricProperty"]
+          metric_type = metric.get("Oem").get("Dell").get("@odata.type")
+          metric_context_id = metric.get("Oem").get("Dell").get("ContextID")
+          metric_label = metric.get("Oem").get("Dell").get("Label")
+          metric_source = metric.get("Oem").get("Dell").get("Source")
+          metric_fqdd = metric.get("Oem").get("Dell").get("FQDD")
 
-          metric_timestamp_object = datetime.strptime(metric_timestamp_str, "%Y-%m-%dT%H:%M:%S.%fZ")
-          metric_timestamp = metric_timestamp_object.timestamp()
-          metric_timestamp_nano = int(metric_timestamp * 1e9)
+          # If timestamp not found in metric use timestamp from event. Used for SerialLog metric report
+          if not metric_timestamp_str:
+            metric_timestamp_object = datetime.strptime(timestamp, "%Y-%m-%dT%H:%M:%S.%fZ")
+          else:
+            metric_timestamp_object = datetime.strptime(metric_timestamp_str, "%Y-%m-%dT%H:%M:%S.%fZ")
+          metric_timestamp_nano = convert_utc_to_nano(metric_timestamp_object)
 
-          metricrecord = json.loads(otlp_metricrecord)
-          metric_context_id_strip = metric_context_id.replace(" ", "")
+          metricrecord = json.loads(otlp_metricrecord_guage)
+          # If ContextID not found use Label. Used for CPURegisters metric report
+          if not metric_context_id:
+             metric_context_id_strip = metric_label
+          else:
+            metric_context_id_strip = metric_context_id
           metric_name = f"{metric_context_id_strip}_{metric_id}"
+          # Create valid metric name for Prometheus
+          replace_chars = [".", ":", " "]
+          for c in replace_chars:
+              metric_name = metric_name.replace(c, "")
           metricrecord["name"] = metric_name
           metricrecord["description"] = metric_label
           datapoint = json.loads(otlp_metricrecord_datapoint)
@@ -180,7 +206,8 @@ def convert_redfish_metric_event_to_otlp(redfish_event):
           #log_attribute["value"]["stringValue"] = event_message_id_base
           #datapoint["attributes"].append(log_attribute)
           otlp["resourceMetrics"][0]["scopeMetrics"][0]["metrics"].append(metricrecord)
-      return otlp
+      
+      return otlp, stat_metric
     except Exception as e:
       logger.error("Error converting Redfish Event to OTLP Format")
       logger.error(json.dumps(redfish_event))
@@ -207,12 +234,16 @@ def convert_redfish_log_event_to_otlp(redfish_event):
       otlp["resourceLogs"][0]["scopeLogs"][0]["scope"]["name"] = "idrac.Event" #odata_context
       otlp["resourceLogs"][0]["scopeLogs"][0]["scope"]["version"] = odata_type
 
+      # Generate Stat object to monitor statistics 
+      stat = Stat(name="send_event_count", odata_type=odata_type, event_id=id, event_count=len(events))
+      stat_metric = convert_stat_to_otlp_metric(stat.toJson())
+
       for event in events:
           event_id = event["EventId"]
           event_timestamp_str = event["EventTimestamp"]
           event_timestamp_object = datetime.strptime(event_timestamp_str, "%Y-%m-%dT%H:%M:%S%z")
-          event_timestamp = event_timestamp_object.timestamp()
-          event_timestamp_nano = int(event_timestamp * 1e9)
+          event_timestamp_nano = convert_utc_to_nano(event_timestamp_object)
+
           event_type = event["EventType"]
           event_member_id = event["MemberId"]
           event_message = event["Message"]
@@ -234,7 +265,7 @@ def convert_redfish_log_event_to_otlp(redfish_event):
           logrecord["attributes"].append(log_attribute)
           otlp["resourceLogs"][0]["scopeLogs"][0]["logRecords"].append(logrecord)
 
-      return otlp
+      return otlp, stat_metric
     except Exception as e:
       logger.error("Error converting Redfish Event to OTLP Format")
       logger.error(json.dumps(redfish_event))
@@ -245,12 +276,54 @@ def otlp_send(event, endpoint, sse_type):
     otlp_endpoint = ""
     if sse_type == "event":
         topic = topic_event
-        otlp_event = convert_redfish_log_event_to_otlp(event)
+        otlp_event, stat = convert_redfish_log_event_to_otlp(event)
     elif sse_type == "metric":
         topic = topic_metric
-        otlp_event = convert_redfish_metric_event_to_otlp(event)
+        otlp_event, stat = convert_redfish_metric_event_to_otlp(event)
 
     logger.info(f"Sending event to kafka topic {topic}")
     logger.debug(json.dumps(otlp_event, indent=4))
-    stomp_conn = StompConnection(host='activemq', port=61613, user='admin', password='admin', transport=transport, timeout=timeout)
+    stomp_conn._connect(transport=transport, timeout=timeout)
     stomp_conn.send(body=json.dumps(otlp_event), destination=topic) 
+    stomp_conn.send(body=json.dumps(stat), destination=topic_stat) 
+
+def convert_stat_to_otlp_metric(stat):
+    try:
+      stat = json.loads(stat)
+      otlp = json.loads(otlp_metric_json)
+      timestamp = datetime.now()
+
+      resource_attribute = json.loads(otlp_attribute)
+      resource_attribute["key"] = "source"
+      resource_attribute["value"]["stringValue"] = "idrac-sse"
+      otlp["resourceMetrics"][0]["resource"]["attributes"].append(resource_attribute)
+
+      otlp["resourceMetrics"][0]["scopeMetrics"][0]["scope"]["name"] = "idrac.sse.stat" 
+      otlp["resourceMetrics"][0]["scopeMetrics"][0]["scope"]["version"] = "1.0.0"
+
+      metric_timestamp = timestamp.timestamp()
+      metric_timestamp_nano = int(metric_timestamp * 1e9)
+
+      metricrecord = json.loads(otlp_metricrecord_guage)
+      metricrecord["name"] = stat["name"]
+      metricrecord["description"] = ""
+      datapoint = json.loads(otlp_metricrecord_datapoint)
+
+      datapoint["timeUnixNano"] = metric_timestamp_nano
+      metric_value_float = 0 
+      try:
+          metric_value_float = float(stat["event_count"])
+      except ValueError:
+          logger.debug("Not a float")
+      datapoint["asDouble"] = metric_value_float 
+      metricrecord["gauge"]["dataPoints"].append(datapoint)
+      #log_attribute = json.loads(otlp_attribute)
+      #log_attribute["key"] = "messageId"
+      #log_attribute["value"]["stringValue"] = event_message_id_base
+      #datapoint["attributes"].append(log_attribute)
+      otlp["resourceMetrics"][0]["scopeMetrics"][0]["metrics"].append(metricrecord)
+      return otlp
+    except Exception as e:
+      logger.error("Error converting Redfish Event to OTLP Format")
+      logger.error(stat)
+      logger.exception(e)

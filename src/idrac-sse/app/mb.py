@@ -7,6 +7,10 @@ import utils
 logger = logging.getLogger(__name__)
 otel_receiver = os.environ.get('OTEL_RECEIVER')
 
+topic_event = "/queue/otel/event"
+topic_metric = "/queue/otel/metric"
+topic_stat = "/queue/otel/listener_stats"
+
 class EventListener(stomp.ConnectionListener):
     def __init__(self, transport, timeout):
         self._transport = transport
@@ -20,7 +24,9 @@ class EventListener(stomp.ConnectionListener):
         logger.debug(frame.body)
         #listener_stats(frame.body)
         otlp_endpoint = f"{otel_receiver}/v1/logs"
-        utils.send_to_endpoint(event=json.loads(frame.body), endpoint=otlp_endpoint, transport=self._transport, timeout=self._timeout)
+        event_json = json.loads(frame.body)
+        #logger.info(f"DEBUG: {event_json}")
+        utils.send_to_endpoint(event=event_json, endpoint=otlp_endpoint, transport=self._transport, timeout=self._timeout)
 
 class MetricListener(stomp.ConnectionListener):
     def __init__(self, transport, timeout):
@@ -33,7 +39,22 @@ class MetricListener(stomp.ConnectionListener):
         logger.info("Stomp MetricListener received message")
         logger.debug(frame.body)
         otlp_endpoint = f"{otel_receiver}/v1/metrics"
-        utils.send_to_endpoint(event=json.loads(frame.body), endpoint=otlp_endpoint, transport=self._transport, timeout=self._timeout)
+        event_json = json.loads(frame.body)
+        utils.send_to_endpoint(event=event_json, endpoint=otlp_endpoint, transport=self._transport, timeout=self._timeout)
+
+class StatListener(stomp.ConnectionListener):
+    def __init__(self, transport, timeout):
+        self._transport = transport
+        self._timeout = timeout
+    def on_error(self, frame):
+        logger.error('Stomp StatListener received error "%s"' % frame.body)
+
+    def on_message(self, frame):
+        logger.info("Stomp StatListener received message")
+        logger.debug(frame.body)
+        otlp_endpoint = f"{otel_receiver}/v1/metrics"
+        event_json = json.loads(frame.body)
+        utils.send_to_endpoint(event=event_json, endpoint=otlp_endpoint, transport=self._transport, timeout=self._timeout)
 
 class StompConnection:
     _instance = None
@@ -61,13 +82,14 @@ class StompConnection:
                 self.conn = stomp.Connection([(self.host, self.port)], "idrac-sse")
                 event_listener = EventListener(transport=transport, timeout=timeout)
                 metric_listener = MetricListener(transport=transport, timeout=timeout)
+                stat_listener = StatListener(transport=transport, timeout=timeout)
                 self.conn.set_listener("event", event_listener)
                 self.conn.set_listener("metric", metric_listener)
+                self.conn.set_listener("stat", stat_listener)
                 self.conn.connect(self.user, self.password, wait=True)
-                topic_event = "otel/event"
-                topic_metric = "otel/metric"
-                self.conn.subscribe(topic_event, "idrac-sse")
-                self.conn.subscribe(topic_metric, "idrac-sse")
+                self.conn.subscribe(topic_event, "idrac-sse-event")
+                self.conn.subscribe(topic_metric, "idrac-sse-metric")
+                self.conn.subscribe(topic_stat, "idrac-sse-stat")
                 logger.info(f"Connected to STOMP server {self.host}:{self.port}")
             except Exception as e:
                 logger.error(f"Could not connect to activemq server {self.host}:{self.port}")
@@ -83,5 +105,6 @@ class StompConnection:
             logger.info(f"Sending message to STOMP server {self.host}:{self.port}, topic: {destination}")
             self.conn.send(body=body, destination=destination)
         except Exception as e:
+            self.conn = None
             logger.error(f"Could not send message to activemq server {self.host}:{self.port}")
             logger.exception(e)

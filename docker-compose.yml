@@ -14,6 +14,7 @@ services:
     restart: unless-stopped
     environment:
       - LOGLEVEL=INFO
+      - TZINFO=America/Denver
       - iDRAC_USERNAME=root
       - iDRAC_PASSWORD
       - OTEL_RECEIVER=http://${OTEL_COLLECTOR_HOST}:${OTEL_COLLECTOR_PORT_HTTP}
@@ -24,6 +25,8 @@ services:
     depends_on:
       activemq:
         condition: service_healthy
+      otel-collector:
+        condition: service_started
     networks:
       - idrac-sse-demo
 
@@ -86,6 +89,51 @@ services:
     healthcheck:
       test: ["CMD-SHELL", "curl -k -f http://localhost:8161"]
       interval: 5s
+    networks:
+      - idrac-sse-demo
+
+  prometheus:
+    image: prom/prometheus:v3.0.1
+    container_name: prometheus
+    command:
+      - --web.console.templates=/etc/prometheus/consoles
+      - --web.console.libraries=/etc/prometheus/console_libraries
+      - --storage.tsdb.retention.time=24h
+      - --config.file=/etc/prometheus/prometheus-config.yaml
+      - --storage.tsdb.path=/prometheus
+      - --web.enable-lifecycle
+      - --web.route-prefix=/
+      - --web.enable-otlp-receiver
+      #- --enable-feature=exemplar-storage
+    volumes:
+      - ./src/prometheus/prometheus-config.yaml:/etc/prometheus/prometheus-config.yaml
+    deploy:
+      resources:
+        limits:
+          memory: 300M
+    restart: unless-stopped
+    ports:
+      - "9090:9090"
+    logging: *logging
+    networks:
+      - idrac-sse-demo
+
+  grafana:
+    image: grafana/grafana:11.4.0
+    container_name: grafana
+    deploy:
+      resources:
+        limits:
+          memory: 120M
+    restart: unless-stopped
+    environment:
+      - "GF_INSTALL_PLUGINS=grafana-opensearch-datasource"
+    volumes:
+      - ./src/grafana/grafana.ini:/etc/grafana/grafana.ini
+      - ./src/grafana/provisioning/:/etc/grafana/provisioning/
+    ports:
+      - "3000:3000"
+    logging: *logging
     networks:
       - idrac-sse-demo
 

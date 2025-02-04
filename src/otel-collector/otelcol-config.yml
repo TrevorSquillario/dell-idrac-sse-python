@@ -14,6 +14,10 @@ receivers:
             - "https://*"
 
 exporters:
+  otlphttp/prometheus:
+    endpoint: "http://prometheus:9090/api/v1/otlp"
+    tls:
+      insecure: true
   debug:
     #verbosity: detailed
     #sampling_initial: 5
@@ -30,7 +34,7 @@ service:
     metrics:
       receivers: [otlp]
       processors: [batch]
-      exporters: [ debug]
+      exporters: [otlphttp/prometheus, debug]
     logs:
       receivers: [otlp]
       processors: [batch]
