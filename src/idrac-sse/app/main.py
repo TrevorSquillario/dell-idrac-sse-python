@@ -52,11 +52,6 @@ LOGGING_CONFIG = {
             'level': loglevel,
             'propagate': False
         },
-        'listener_stats': {  # root logger
-            'handlers': ['default'],
-            'level': loglevel,
-            'propagate': False
-        },
         'mb': {  # root logger
             'handlers': ['default'],
             'level': loglevel,
@@ -127,8 +122,8 @@ def main():
             p1.start()
             p2.start()
 
-            #for p in processes:
-            #    p.join()
+            for p in processes:
+                p.join()
     
     except Exception as e:
         logger.exception(e)

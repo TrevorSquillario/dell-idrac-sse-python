@@ -3,7 +3,6 @@ import httpx
 from asyncio import Task, create_task
 from typing import List, Awaitable
 import logging
-import listener_stats
 import otel_pump
 
 logger = logging.getLogger(__name__)

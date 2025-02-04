@@ -15,7 +15,6 @@ from httpx_sse import connect_sse, aconnect_sse
 from tenacity import retry, stop_after_attempt, stop_after_delay, wait_exponential, after_log
 from datetime import datetime
 import otel_pump
-import listener_stats
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +25,7 @@ idrac_username = os.environ.get('iDRAC_USERNAME')
 idrac_password = os.environ.get('iDRAC_PASSWORD')
 otel_receiver = os.environ.get('OTEL_RECEIVER') 
 http_receiver = os.environ.get('HTTP_RECEIVER')
+hostname_value_from = os.environ.get('HOSTNAME_VALUE_FROM')
 
 def test_host_connection(host):
     url = "https://%s/redfish/v1/Managers/iDRAC.Embedded.1" % (host)
@@ -52,7 +52,7 @@ async def test_host_connection_async(host):
             logger.error(response.json())
             return False
 
-def get_attributes(host, user, passwd):
+def get_mrd(host, user, passwd):
     """ 
     Checks the current status of telemetry and creates telemetry_attributes, a list of telemetry attributes
     """
@@ -71,7 +71,7 @@ def get_attributes(host, user, passwd):
         logger.error("- FAIL: detailed error message: {e}")
     return telemetry_attributes
 
-def set_attributes(host, user, passwd, attributes, filter, enable: bool):
+def set_mrd(host, user, passwd, attributes, filter, enable: bool):
     """
     Uses the RedFish API to set the telemetry enabled attribute to user defined status.
     """
@@ -104,17 +104,63 @@ def set_attributes(host, user, passwd, attributes, filter, enable: bool):
     except Exception as e:
         logger.error("- FAIL: detailed error message: {e}")
 
+def get_attributes(host, attribute_name = None):
+    try:
+        url = "https://%s/redfish/v1/Managers/iDRAC.Embedded.1/Attributes" % (host)
+        logger.info("Get iDRAC attribute %s" % (url))
+        response = httpx.get(url, verify=False, timeout=timeout, auth=(idrac_username, idrac_password))
+        response_json = response.json()
+        attributes = response_json["Attributes"]
+        if response.status_code == 200:
+            if attribute_name:
+                return attributes[attribute_name]
+            else:
+                return attributes
+        else:
+            logger.error(response.json())
+            return False
+    except Exception as e:
+        logger.error("Failed to get iDRAC Attributes")
+        logger.exception(e)
+
+def get_hostname(host):
+    try:
+        if hostname_value_from == "hosts_file":
+            logger.info(f"Set hostname as {host}")
+            return host
+        else:
+            url = "https://%s/redfish/v1/Systems/System.Embedded.1?$select=HostName" % (host)
+            logger.info("Get system hostname from iDRAC (if iSM is installed) %s" % (url))
+            response = httpx.get(url, verify=False, timeout=timeout, auth=(idrac_username, idrac_password))
+            response_json = response.json()
+            logger.info(response_json)
+            hostname = response_json["HostName"]
+            if response.status_code == 200:
+                if hostname == "":
+                    logger.info("HostName not set, get DNSRacName from Attributes")
+                    hostname = get_attributes(host, "NIC.1.DNSRacName")
+                logger.info(f"Set hostname as {hostname}")
+                return hostname
+            else:
+                logger.error(response.json())
+                logger.error(f"Error getting hostname from Redfish, defaulting to value from hosts_file {host}")
+                return host
+    except Exception as e:
+        logger.error("Failed to get iDRAC Hostname")
+        logger.exception(e)
+
 ###
 # Exponential Backoff
 #   * Wait 10 seconds between each retry starting with 10 seconds, then up to 3600 seconds (1 hour). Stop after 86400 seconds (1 day)
 #   * The @retry tenacity decorator only gets triggered if connection is established and Exception is thrown
 ###
-@retry(wait=wait_exponential(multiplier=10, min=10, max=3600), stop=stop_after_delay(86400), after=after_log(logger, logging.DEBUG)) #, reraise=True
+@retry(wait=wait_exponential(multiplier=10, min=10, max=3600), stop=stop_after_delay(86400), after=after_log(logger, logging.INFO)) #, reraise=True
 def get_idrac_sse_httpx(host, user, passwd, sse_type: str = "event"):
     logger.info(f"Running Task for host {host}")
     con_result = test_host_connection(host)
     if con_result:
         logger.info("Testing connection to %s result SUCCESS" % (host))
+        hostname = get_hostname(host)
         with httpx.Client(transport=transport, timeout=timeout) as client:
             if sse_type == "event":
                 url = "https://%s/redfish/v1/SSE?$filter=EventFormatType eq Event" % (host)
@@ -135,10 +181,7 @@ def get_idrac_sse_httpx(host, user, passwd, sse_type: str = "event"):
                             logger.info(f"OTEL Receiver Configured: {otel_receiver}")
                             logger.info(f"SSE Event Type: {sse_type}")
                             try: 
-                                otel_pump.otlp_send(event_json, otel_receiver, sse_type)
-                                #listener_stats.add_redfish_lister_stats(event_json, f"send_{sse_type}")
-                                #stat = listener_stats.convert_redfish_event_to_stat(event_json, f"send_{sse_type}_total")
-                                #otel_pump.otlp_send_stat(stat, otel_receiver)
+                                otel_pump.otlp_send(event_json, hostname, otel_receiver, sse_type)
                             except Exception as e:
                                 logger.exception(e)
                             

@@ -22,7 +22,6 @@ class EventListener(stomp.ConnectionListener):
     def on_message(self, frame):
         logger.info("Stomp EventListener received message")
         logger.debug(frame.body)
-        #listener_stats(frame.body)
         otlp_endpoint = f"{otel_receiver}/v1/logs"
         event_json = json.loads(frame.body)
         #logger.info(f"DEBUG: {event_json}")

@@ -121,7 +121,7 @@ def convert_utc_to_nano(utc_dt):
     local_timestamp_nano = int(local_timestamp * 1e9)
     return local_timestamp_nano
 
-def convert_redfish_metric_event_to_otlp(redfish_event):
+def convert_redfish_metric_event_to_otlp(redfish_event, hostname):
     """
         Convert Redfish payload to OTLP JSON format 
         https://github.com/open-telemetry/opentelemetry-proto/blob/v1.5.0/examples/metrics.json
@@ -149,10 +149,14 @@ def convert_redfish_metric_event_to_otlp(redfish_event):
       stat = Stat(name="send_metric_count", odata_type=odata_type, event_id=odata_id, event_count=len(metrics))
       stat_metric = convert_stat_to_otlp_metric(stat.toJson())
 
-      resource_attribute = json.loads(otlp_attribute)
-      resource_attribute["key"] = "serverServiceTag"
-      resource_attribute["value"]["stringValue"] = server_servicetag
-      otlp["resourceMetrics"][0]["resource"]["attributes"].append(resource_attribute)
+      resource_attribute1 = json.loads(otlp_attribute)
+      resource_attribute1["key"] = "serverServiceTag"
+      resource_attribute1["value"]["stringValue"] = server_servicetag
+      otlp["resourceMetrics"][0]["resource"]["attributes"].append(resource_attribute1)
+      resource_attribute2 = json.loads(otlp_attribute)
+      resource_attribute2["key"] = "serverHostname"
+      resource_attribute2["value"]["stringValue"] = hostname
+      otlp["resourceMetrics"][0]["resource"]["attributes"].append(resource_attribute2)
 
       otlp["resourceMetrics"][0]["scopeMetrics"][0]["scope"]["name"] = "idrac.MetricReport" #odata_context
       otlp["resourceMetrics"][0]["scopeMetrics"][0]["scope"]["version"] = "1.5.0" #odata_type
@@ -201,10 +205,10 @@ def convert_redfish_metric_event_to_otlp(redfish_event):
                   logger.debug("Not a float")
           datapoint["asDouble"] = metric_value_float 
           metricrecord["gauge"]["dataPoints"].append(datapoint)
-          #log_attribute = json.loads(otlp_attribute)
-          #log_attribute["key"] = "messageId"
-          #log_attribute["value"]["stringValue"] = event_message_id_base
-          #datapoint["attributes"].append(log_attribute)
+          log_attribute1 = json.loads(otlp_attribute)
+          log_attribute1["key"] = "serverHostname"
+          log_attribute1["value"]["stringValue"] = hostname
+          datapoint["attributes"].append(log_attribute1)
           otlp["resourceMetrics"][0]["scopeMetrics"][0]["metrics"].append(metricrecord)
       
       return otlp, stat_metric
@@ -213,7 +217,7 @@ def convert_redfish_metric_event_to_otlp(redfish_event):
       logger.error(json.dumps(redfish_event))
       logger.exception(e)      
 
-def convert_redfish_log_event_to_otlp(redfish_event):
+def convert_redfish_log_event_to_otlp(redfish_event, hostname):
     """
         Convert Redfish payload to OTLP JSON format 
         https://github.com/open-telemetry/opentelemetry-proto/blob/v1.5.0/examples/logs.json
@@ -223,15 +227,20 @@ def convert_redfish_log_event_to_otlp(redfish_event):
       odata_context = redfish_event["@odata.context"]
       odata_type = redfish_event["@odata.type"]
       id = redfish_event["Id"]
-      server_hostname = redfish_event["Oem"]["Dell"]["ServerHostname"]
+      #server_hostname = redfish_event["Oem"]["Dell"]["ServerHostname"]
       events = redfish_event["Events"]
+      service_name = "idrac.Event" #odata_context
 
-      resource_attribute = json.loads(otlp_attribute)
-      resource_attribute["key"] = "serverHostname"
-      resource_attribute["value"]["stringValue"] = server_hostname
-      otlp["resourceLogs"][0]["resource"]["attributes"].append(resource_attribute)
+      resource_attribute1 = json.loads(otlp_attribute)
+      resource_attribute1["key"] = "serverHostname"
+      resource_attribute1["value"]["stringValue"] = hostname
+      otlp["resourceLogs"][0]["resource"]["attributes"].append(resource_attribute1)
+      resource_attribute2 = json.loads(otlp_attribute)
+      resource_attribute2["key"] = "service.name"
+      resource_attribute2["value"]["stringValue"] = service_name
+      otlp["resourceLogs"][0]["resource"]["attributes"].append(resource_attribute2)
 
-      otlp["resourceLogs"][0]["scopeLogs"][0]["scope"]["name"] = "idrac.Event" #odata_context
+      otlp["resourceLogs"][0]["scopeLogs"][0]["scope"]["name"] = service_name
       otlp["resourceLogs"][0]["scopeLogs"][0]["scope"]["version"] = odata_type
 
       # Generate Stat object to monitor statistics 
@@ -259,10 +268,19 @@ def convert_redfish_log_event_to_otlp(redfish_event):
           logrecord["traceId"] = "5B8EFFF798038103D269B633813FC60C" #event_id.encode('utf-8').hex()
           logrecord["spanId"] = "EEE19B7EC3C1B174" #event_member_id.encode('utf-8').hex()
           logrecord["body"]["stringValue"] = event_message
-          log_attribute = json.loads(otlp_attribute)
-          log_attribute["key"] = "messageId"
-          log_attribute["value"]["stringValue"] = event_message_id_base
-          logrecord["attributes"].append(log_attribute)
+          # Set log attributes
+          log_attribute1 = json.loads(otlp_attribute)
+          log_attribute1["key"] = "messageId"
+          log_attribute1["value"]["stringValue"] = event_message_id_base
+          logrecord["attributes"].append(log_attribute1)
+          log_attribute2 = json.loads(otlp_attribute)
+          log_attribute2["key"] = "serverHostname"
+          log_attribute2["value"]["stringValue"] = hostname
+          logrecord["attributes"].append(log_attribute2)
+          log_attribute3 = json.loads(otlp_attribute)
+          log_attribute3["key"] = "service.name"
+          log_attribute3["value"]["stringValue"] = service_name
+          logrecord["attributes"].append(log_attribute3)
           otlp["resourceLogs"][0]["scopeLogs"][0]["logRecords"].append(logrecord)
 
       return otlp, stat_metric
@@ -271,15 +289,15 @@ def convert_redfish_log_event_to_otlp(redfish_event):
       logger.error(json.dumps(redfish_event))
       logger.exception(e) 
 
-def otlp_send(event, endpoint, sse_type):
+def otlp_send(event, hostname, endpoint, sse_type):
     otlp_event = ""
     otlp_endpoint = ""
     if sse_type == "event":
         topic = topic_event
-        otlp_event, stat = convert_redfish_log_event_to_otlp(event)
+        otlp_event, stat = convert_redfish_log_event_to_otlp(event, hostname)
     elif sse_type == "metric":
         topic = topic_metric
-        otlp_event, stat = convert_redfish_metric_event_to_otlp(event)
+        otlp_event, stat = convert_redfish_metric_event_to_otlp(event, hostname)
 
     logger.info(f"Sending event to kafka topic {topic}")
     logger.debug(json.dumps(otlp_event, indent=4))

@@ -19,6 +19,7 @@ services:
       - iDRAC_PASSWORD
       - OTEL_RECEIVER=http://${OTEL_COLLECTOR_HOST}:${OTEL_COLLECTOR_PORT_HTTP}
       - HTTP_RECEIVER
+      - HOSTNAME_VALUE_FROM=hosts_file # redfish
     volumes:
       #- ./hosts_test:/code/app/hosts
       - ./hosts:/code/app/hosts
@@ -67,6 +68,11 @@ services:
       - OTEL_COLLECTOR_HOST
       - OTEL_COLLECTOR_PORT_GRPC
       - OTEL_COLLECTOR_PORT_HTTP
+    depends_on:
+      prometheus:
+        condition: service_started
+      loki:
+        condition: service_started
     networks:
       - idrac-sse-demo
 
@@ -118,8 +124,19 @@ services:
     networks:
       - idrac-sse-demo
 
+  loki:
+    image: grafana/loki:latest
+    container_name: loki
+    ports:
+      - "3100:3100"
+    command: -config.file=/etc/loki/local-config.yaml
+    volumes:
+      - ./src/loki/local-config.yaml:/etc/loki/local-config.yaml
+    networks:
+      - idrac-sse-demo
+
   grafana:
-    image: grafana/grafana:11.4.0
+    image: grafana/grafana:latest
     container_name: grafana
     deploy:
       resources:
