@@ -5,22 +5,22 @@ import json
 import idrac_redfish as idrac
 import utils
 logger = logging.getLogger(__name__)
-otel_receiver = os.environ.get('OTEL_RECEIVER')
 
-topic_event = "/queue/otel/event"
-topic_metric = "/queue/otel/metric"
-topic_stat = "/queue/otel/listener_stats"
+otel_receiver = os.environ.get('iDRAC_SSE_OTEL_RECEIVER')
+topic_event = os.environ.get('iDRAC_SSE_TOPIC_LOG')
+topic_metric = os.environ.get('iDRAC_SSE_TOPIC_METRIC')
+topic_stat = os.environ.get('iDRAC_SSE_TOPIC_STAT')
 
-class EventListener(stomp.ConnectionListener):
+class LogListener(stomp.ConnectionListener):
     def __init__(self, transport, timeout):
         self._transport = transport
         self._timeout = timeout
 
     def on_error(self, frame):
-        logger.error('Stomp EventListener received error "%s"' % frame.body)
+        logger.error('Stomp LogListener received error "%s"' % frame.body)
 
     def on_message(self, frame):
-        logger.info("Stomp EventListener received message")
+        logger.info("Stomp LogListener received message")
         logger.debug(frame.body)
         otlp_endpoint = f"{otel_receiver}/v1/logs"
         event_json = json.loads(frame.body)
@@ -79,14 +79,14 @@ class StompConnection:
         if self.conn is None:
             try:
                 self.conn = stomp.Connection([(self.host, self.port)], "idrac-sse")
-                event_listener = EventListener(transport=transport, timeout=timeout)
+                event_listener = LogListener(transport=transport, timeout=timeout)
                 metric_listener = MetricListener(transport=transport, timeout=timeout)
                 stat_listener = StatListener(transport=transport, timeout=timeout)
-                self.conn.set_listener("event", event_listener)
+                self.conn.set_listener("log", event_listener)
                 self.conn.set_listener("metric", metric_listener)
                 self.conn.set_listener("stat", stat_listener)
                 self.conn.connect(self.user, self.password, wait=True)
-                self.conn.subscribe(topic_event, "idrac-sse-event")
+                self.conn.subscribe(topic_event, "idrac-sse-log")
                 self.conn.subscribe(topic_metric, "idrac-sse-metric")
                 self.conn.subscribe(topic_stat, "idrac-sse-stat")
                 logger.info(f"Connected to STOMP server {self.host}:{self.port}")

@@ -25,8 +25,8 @@ loglevel_str = os.environ.get('LOGLEVEL', default='INFO')
 loglevel = getattr(logging, loglevel_str, "INFO")
 idrac_username = os.environ.get('iDRAC_USERNAME')
 idrac_password = os.environ.get('iDRAC_PASSWORD')
-otel_receiver = os.environ.get('OTEL_RECEIVER')
-http_receiver = os.environ.get('HTTP_RECEIVER')
+otel_receiver = os.environ.get('iDRAC_SSE_OTEL_RECEIVER')
+http_receiver = os.environ.get('iDRAC_SSE_HTTP_RECEIVER')
 
 LOGGING_CONFIG = { 
     'version': 1,
@@ -115,15 +115,32 @@ def main():
             #idrac.set_attributes(host, idrac_username, idrac_password, attributes=reports, filter=reports_to_enable, enable=True) 
 
             # Create two instances of the Process class, one for each function 
-            p1 = Process(target=idrac.get_idrac_sse_httpx, args=(host, idrac_username, idrac_password, "event"))
+            p1 = Process(target=idrac.get_idrac_sse_httpx, args=(host, idrac_username, idrac_password, "log"))
+            p1.host = host
+            p1.sse_type = "log"
             p2 = Process(target=idrac.get_idrac_sse_httpx, args=(host, idrac_username, idrac_password, "metric"))
+            p2.host = host
+            p2.sse_type = "metric"
             processes.append(p1)
             processes.append(p2)
             p1.start()
             p2.start()
 
-            for p in processes:
+        while True:
+            for i, p in enumerate(processes):
                 p.join()
+                logger.error(f"Process exited for {p.host} > {p.sse_type} with error code {p.exitcode}, restarting...")
+                #p.start()
+                px = Process(target=idrac.get_idrac_sse_httpx, args=(p.host, idrac_username, idrac_password, p.sse_type))
+                px.host = p.host
+                px.sse_type = p.sse_type
+                processes.pop(i)
+                processes.append(px)
+                px.start()
+            
+            time.sleep(5)
+
+
     
     except Exception as e:
         logger.exception(e)

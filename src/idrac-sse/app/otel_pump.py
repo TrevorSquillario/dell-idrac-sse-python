@@ -7,7 +7,11 @@ import pytz
 from mb import StompConnection, topic_event, topic_metric, topic_stat
 from models import Stat
 
-otel_receiver = os.environ.get('OTEL_RECEIVER')
+otel_receiver = os.environ.get('iDRAC_SSE_OTEL_RECEIVER')
+stomp_server = os.environ.get('iDRAC_SSE_STOMP_SERVER')
+stomp_port = os.environ.get('iDRAC_SSE_STOMP_PORT')
+stomp_user = os.environ.get('iDRAC_SSE_STOMP_USER')
+stomp_pass = os.environ.get('iDRAC_SSE_STOMP_PASS')
 tz = os.environ.get("TZINFO")
 
 logger = logging.getLogger(__name__)
@@ -15,7 +19,7 @@ logger = logging.getLogger(__name__)
 timeout = httpx.Timeout(10.0, read=None)
 transport = httpx.HTTPTransport(verify=False, retries=10)
 
-stomp_conn = StompConnection(host="activemq", port=61613, user='admin', password='admin', transport=transport, timeout=timeout)
+stomp_conn = StompConnection(host=stomp_server, port=stomp_port, user=stomp_user, password=stomp_pass, transport=transport, timeout=timeout)
 
 otlp_log_json = """{
   "resourceLogs": [
@@ -292,7 +296,7 @@ def convert_redfish_log_event_to_otlp(redfish_event, hostname):
 def otlp_send(event, hostname, endpoint, sse_type):
     otlp_event = ""
     otlp_endpoint = ""
-    if sse_type == "event":
+    if sse_type == "log":
         topic = topic_event
         otlp_event, stat = convert_redfish_log_event_to_otlp(event, hostname)
     elif sse_type == "metric":

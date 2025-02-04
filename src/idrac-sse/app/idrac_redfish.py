@@ -23,9 +23,9 @@ transport = httpx.HTTPTransport(verify=False, retries=10)
 
 idrac_username = os.environ.get('iDRAC_USERNAME')
 idrac_password = os.environ.get('iDRAC_PASSWORD')
-otel_receiver = os.environ.get('OTEL_RECEIVER') 
-http_receiver = os.environ.get('HTTP_RECEIVER')
-hostname_value_from = os.environ.get('HOSTNAME_VALUE_FROM')
+otel_receiver = os.environ.get('iDRAC_SSE_OTEL_RECEIVER') 
+http_receiver = os.environ.get('iDRAC_SSE_HTTP_RECEIVER')
+hostname_value_from = os.environ.get('iDRAC_SSE_HOSTNAME_VALUE_FROM')
 
 def test_host_connection(host):
     url = "https://%s/redfish/v1/Managers/iDRAC.Embedded.1" % (host)
@@ -155,14 +155,14 @@ def get_hostname(host):
 #   * The @retry tenacity decorator only gets triggered if connection is established and Exception is thrown
 ###
 @retry(wait=wait_exponential(multiplier=10, min=10, max=3600), stop=stop_after_delay(86400), after=after_log(logger, logging.INFO)) #, reraise=True
-def get_idrac_sse_httpx(host, user, passwd, sse_type: str = "event"):
-    logger.info(f"Running Task for host {host}")
+def get_idrac_sse_httpx(host, user, passwd, sse_type):
+    logger.info(f"Started SSE Receive process for host {host}, type={sse_type}")
     con_result = test_host_connection(host)
     if con_result:
         logger.info("Testing connection to %s result SUCCESS" % (host))
         hostname = get_hostname(host)
         with httpx.Client(transport=transport, timeout=timeout) as client:
-            if sse_type == "event":
+            if sse_type == "log":
                 url = "https://%s/redfish/v1/SSE?$filter=EventFormatType eq Event" % (host)
             elif sse_type == "metric":
                 url = "https://%s/redfish/v1/SSE?$filter=EventFormatType eq MetricReport" % (host)
